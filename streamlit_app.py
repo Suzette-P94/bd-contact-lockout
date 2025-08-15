@@ -8,32 +8,51 @@ import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 
-# Fuzzy matching
+# Fuzzy matching (optional)
 try:
-    from rapidfuzz import fuzz, process
+    from rapidfuzz import fuzz
     HAS_RAPIDFUZZ = True
 except Exception:
     HAS_RAPIDFUZZ = False
 
 st.set_page_config(page_title="BD Day – Contact Lockout", page_icon="📞", layout="wide")
 st.title("📞 BD Day – Contact Lockout")
-st.caption("Lock before you dial. Everyone sees locks instantly across brands. Fuzzy matching + domain + phone checks.")
+st.caption("Lock before you dial. Everyone sees locks instantly across brands. Duplicate checks: exact email/phone, domain match, fuzzy company (optional).")
 
 # ----------------------------
 # SETTINGS (SIDEBAR)
 # ----------------------------
 with st.sidebar:
     st.header("Settings")
-    default_url = os.environ.get("SHEET_URL", st.secrets.get("SHEET_URL", "")) if hasattr(st, "secrets") else os.environ.get("SHEET_URL", "")
-    sheet_url = st.text_input("Google Sheet URL", value=default_url, help="Share this sheet with the service account email below.")
+
+    # Prefer SHEET_URL from Secrets; support both root-level and inside gcp_service_account, then fall back to env.
+    default_url = ""
+    if hasattr(st, "secrets"):
+        default_url = st.secrets.get("SHEET_URL", "") or default_url
+        if not default_url and "gcp_service_account" in st.secrets:
+            try:
+                default_url = st.secrets["gcp_service_account"].get("SHEET_URL", "")
+            except Exception:
+                default_url = default_url
+    if not default_url:
+        default_url = os.environ.get("SHEET_URL", "")
+
+    if default_url:
+        sheet_url = default_url  # Locked in by admin
+        st.caption("Sheet is preconfigured by the admin.")
+    else:
+        sheet_url = st.text_input(
+            "Google Sheet URL (admin only)",
+            value="",
+            help="Set via Secrets as SHEET_URL so users never see this."
+        )
+
     tz_name = st.selectbox("Timezone", ["Europe/London", "UTC"], index=0)
     fuzzy_threshold = st.slider("Fuzzy company match threshold", min_value=70, max_value=95, value=82, help="Higher = stricter matches")
     st.markdown("---")
     st.markdown("**Auth methods:**")
-    st.markdown("• Local file: `service_account.json` in app folder")
-    st.markdown("• Streamlit Cloud secrets: key `gcp_service_account` (JSON)")
-    st.markdown("---")
-    st.markdown("**Tip:** Exact matches are checked for email/phone. Domains are also matched (e.g. `@pwc.com`).")
+    st.markdown("• Streamlit Secrets: key `gcp_service_account` (JSON) + `SHEET_URL` (root or inside that block)")
+    st.markdown("• Or local `service_account.json` when running locally")
 
 # ----------------------------
 # AUTH
@@ -46,8 +65,7 @@ def get_credentials():
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive",
         ]
-        creds = Credentials.from_service_account_info(service_account_info, scopes=scopes)
-        return creds
+        return Credentials.from_service_account_info(service_account_info, scopes=scopes)
     # Fallback to local file
     if os.path.exists("service_account.json"):
         scopes = [
@@ -68,7 +86,7 @@ def open_sheet(url: str):
     try:
         ws = sh.worksheet("Locks")
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title="Locks", rows=2000, cols=12)
+        ws = sh.add_worksheet(title="Locks", rows=4000, cols=12)
         ws.update(
             "A1:I1",
             [["Timestamp","Date","Company","Contact Name","Email","Phone","Brand","Locked By","Notes"]],
@@ -86,32 +104,88 @@ def now_in_tz(tz="Europe/London"):
 def normalize_text(x: str) -> str:
     if not x:
         return ""
-    return " ".join(x.strip().lower().split())
+    return " ".join(str(x).strip().lower().split())
 
 def normalize_phone(p: str) -> str:
     if not p:
         return ""
-    return "".join(ch for ch in p if ch.isdigit())
+    return "".join(ch for ch in str(p) if ch.isdigit())
 
 def email_domain(email: str) -> str:
     if not email:
         return ""
-    e = email.strip().lower()
+    e = str(email).strip().lower()
     if "@" in e:
         return e.split("@", 1)[1]
     return ""
 
+def find_duplicates(df, company_n, email_n, phone_n, domain, fuzzy_threshold):
+    """Return list of (label, dataframe) duplicate hits and a combined dataframe for final review."""
+    hits = []
+
+    if df.empty:
+        return hits, pd.DataFrame(columns=df.columns)
+
+    # Exact email
+    if email_n:
+        exact_email = df[df["_email_n"] == email_n]
+        if not exact_email.empty:
+            hits.append(("Exact email", exact_email))
+
+    # Exact phone
+    if phone_n:
+        exact_phone = df[df["_phone_n"] == phone_n]
+        if not exact_phone.empty:
+            hits.append(("Exact phone", exact_phone))
+
+    # Domain match
+    if domain:
+        dom_df = df[df["_domain"] == domain]
+        if not dom_df.empty:
+            hits.append((f"Same email domain @{domain}", dom_df))
+
+    # Fuzzy company
+    if company_n and HAS_RAPIDFUZZ:
+        uniq_companies = df["_company_n"].dropna().unique().tolist()
+        matched_vals = []
+        for comp in uniq_companies:
+            if not comp:
+                continue
+            score = fuzz.token_set_ratio(company_n, comp)
+            if score >= fuzzy_threshold:
+                matched_vals.append(comp)
+        if matched_vals:
+            fuzzy_df = df[df["_company_n"].isin(set(matched_vals))]
+            if not fuzzy_df.empty:
+                hits.append((f"Fuzzy company ≥{fuzzy_threshold}", fuzzy_df))
+
+    # Build combined
+    if hits:
+        parts = [h[1] for h in hits]
+        combined = pd.concat(parts, axis=0).drop_duplicates().sort_values("Timestamp", ascending=False)
+    else:
+        combined = pd.DataFrame(columns=df.columns)
+    return hits, combined
+
 # ----------------------------
-# LOAD
+# SAFE PRECHECKS / EARLY UI
 # ----------------------------
+if not 'confirm_sig' in st.session_state:
+    st.session_state['confirm_sig'] = None
+if not 'confirm_ready' in st.session_state:
+    st.session_state['confirm_ready'] = False
+
 if not sheet_url:
-    st.warning("Add your Google Sheet URL in the sidebar to continue.")
+    st.warning("Admin: set SHEET_URL in Secrets so users aren't asked for it.")
     st.stop()
 
+# ----------------------------
+# LOAD EXISTING DATA
+# ----------------------------
 try:
     ws = open_sheet(sheet_url)
 except Exception as e:
-    st.error(f"Could not open sheet: {e}")
+    st.error(f"Could not open sheet. Check URL, sharing and credentials. Details: {e}")
     st.stop()
 
 rows = ws.get_all_records()
@@ -129,17 +203,18 @@ else:
                                "_company_n","_email_n","_domain","_phone_n"])
 
 # ----------------------------
-# FORM
+# FORM: LOCK A CONTACT
 # ----------------------------
 st.subheader("Lock a Contact")
-with st.form("lock_form", clear_on_submit=True):
+
+with st.form("lock_form", clear_on_submit=False):
     col1, col2, col3 = st.columns([1.3,1,1])
     with col1:
         company = st.text_input("Company *")
         contact_name = st.text_input("Contact Name *")
         email = st.text_input("Email (recommended)")
         phone = st.text_input("Phone")
-        notes = st.text_area("Notes (optional)", height=80)
+        notes = st.text_area("Notes (optional)", height=72)
     with col2:
         brand = st.selectbox("Your Brand *", ["Dartmouth Partners","Catalyst Partners","Pure Search","Other"])
         locked_by = st.text_input("Your Name *", value="")
@@ -152,65 +227,60 @@ with st.form("lock_form", clear_on_submit=True):
         check_domain = email_domain(email)
         check_phone = normalize_phone(phone)
 
-        hits = []
-        if not df.empty:
-            # Exact email
-            if check_email:
-                exact_email = df[df["_email_n"] == check_email]
-                if not exact_email.empty:
-                    hits.append(("Exact email", exact_email))
+        live_hits, live_combined = find_duplicates(df, check_company, check_email, check_phone, check_domain, fuzzy_threshold)
 
-            # Exact phone
-            if check_phone:
-                exact_phone = df[df["_phone_n"] == check_phone]
-                if not exact_phone.empty:
-                    hits.append(("Exact phone", exact_phone))
-
-            # Domain match
-            if check_domain:
-                dom = df[df["_domain"] == check_domain]
-                if not dom.empty:
-                    hits.append((f"Same email domain @{check_domain}", dom))
-
-            # Fuzzy company (if rapidfuzz available)
-            if check_company and HAS_RAPIDFUZZ:
-                uniq_companies = df["_company_n"].dropna().unique().tolist()
-                scored = []
-                for comp in uniq_companies:
-                    if not comp:
-                        continue
-                    score = fuzz.token_set_ratio(check_company, comp)
-                    if score >= fuzzy_threshold:
-                        scored.append((comp, score))
-                if scored:
-                    matched_vals = set(c for c, s in scored)
-                    fuzzy_df = df[df["_company_n"].isin(matched_vals)]
-                    if not fuzzy_df.empty:
-                        hits.append((f"Fuzzy company ≥{fuzzy_threshold}", fuzzy_df))
-
-        if hits:
-            st.error("⚠️ Potential duplicate(s) found. Review below before locking.")
-            for label, sub in hits:
+        if live_hits:
+            st.error("⚠ Potential duplicate(s) detected while typing. Review below.")
+            for label, sub in live_hits:
                 st.markdown(f"**{label}**")
                 st.dataframe(
                     sub[["Timestamp","Company","Contact Name","Email","Phone","Brand","Locked By","Notes"]].sort_values("Timestamp", ascending=False),
                     use_container_width=True
                 )
         else:
-            st.success("✅ No duplicates found on company/email/phone/domain checks.")
+            st.success("✅ No duplicates found yet on company/email/phone/domain checks.")
 
     submitted = st.form_submit_button("🔒 Lock Contact")
+
+    # Final submit logic with two-step confirm
     if submitted:
+        # Basic required checks
         if not company or not contact_name or not brand or not locked_by:
             st.warning("Please fill in all *required* fields.")
+        elif not email and not phone:
+            st.warning("Please provide at least an Email or a Phone number.")
         else:
-            ts = now_in_tz(tz_name)
-            date_str = ts.strftime("%Y-%m-%d")
-            ts_iso = ts.strftime("%Y-%m-%d %H:%M:%S")
-            new_row = [ts_iso, date_str, company.strip(), contact_name.strip(), email.strip(), phone.strip(), brand, locked_by.strip(), notes.strip()]
-            ws.append_row(new_row, value_input_option="USER_ENTERED")
-            st.success("Contact locked for today. Visible to all teams now.")
-            st.experimental_rerun()
+            # Recompute duplicates on submit for safety
+            hits, combined = find_duplicates(df, check_company, check_email, check_phone, check_domain, fuzzy_threshold)
+            sig = f"{check_email}|{check_phone}|{check_company}"
+
+            if hits and (st.session_state['confirm_sig'] != sig or not st.session_state['confirm_ready']):
+                # First submit with duplicates -> show blocking banner
+                st.session_state['confirm_sig'] = sig
+                st.session_state['confirm_ready'] = True
+                st.error("⚠ Potential duplicate(s) detected — please review the matches above. "
+                         "If you still want to proceed, click **Lock Contact** again to confirm.")
+                # Also render duplicates table full width for emphasis
+                if not combined.empty:
+                    st.dataframe(
+                        combined[["Timestamp","Company","Contact Name","Email","Phone","Brand","Locked By","Notes"]],
+                        use_container_width=True
+                    )
+            else:
+                # Either no duplicates OR user confirmed by clicking again with same signature
+                try:
+                    ts = now_in_tz(tz_name)
+                    date_str = ts.strftime("%Y-%m-%d")
+                    ts_iso = ts.strftime("%Y-%m-%d %H:%M:%S")
+                    new_row = [ts_iso, date_str, company.strip(), contact_name.strip(), email.strip(), phone.strip(), brand, locked_by.strip(), notes.strip()]
+                    ws.append_row(new_row, value_input_option="USER_ENTERED")
+                    st.success("Contact locked for today. Visible to all teams now.")
+                    # Reset confirmation state
+                    st.session_state['confirm_sig'] = None
+                    st.session_state['confirm_ready'] = False
+                    st.experimental_rerun()
+                except Exception as e:
+                    st.error(f"Failed to save. Details: {e}")
 
 # ----------------------------
 # TODAY VIEW
@@ -243,7 +313,7 @@ if not df.empty:
         qn = normalize_phone(q_phone)
         today_df = today_df[today_df["_phone_n"].str.contains(qn, na=False)]
 
-    # Mark dupes within today (any same email OR same phone OR same company norm)
+    # Mark dupes within today (same email OR same phone OR same company norm)
     if not today_df.empty:
         today_df["Dup Today?"] = (
             today_df.duplicated(subset=["_email_n"], keep="first") |
