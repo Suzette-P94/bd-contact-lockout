@@ -55,7 +55,6 @@ def get_qp(key: str) -> str:
     try:
         qp = st.query_params
         v = qp.get(key, "")
-        # If Streamlit returns a list, pick first
         if isinstance(v, list):
             return v[0] if v else ""
         return v or ""
@@ -65,7 +64,6 @@ def get_qp(key: str) -> str:
 def set_qp(**kwargs):
     """Safe set of query params; clears keys when value is empty."""
     try:
-        # Build new dict from existing
         qp = dict(st.query_params)
         for k, v in kwargs.items():
             if v:
@@ -78,7 +76,7 @@ def set_qp(**kwargs):
         pass
 
 # ----------------------------
-# SETTINGS (SIDEBAR) + SIGN-UP
+# SETTINGS (SIDEBAR) + PROFILE
 # ----------------------------
 with st.sidebar:
     st.header("Settings")
@@ -111,27 +109,40 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("Your profile (Remember me)")
 
-    # Initialize profile state with query params or sensible defaults
+    # Initialize profile state from URL params or defaults
     st.session_state.setdefault("profile_name", get_qp("name"))
     qp_brand = get_qp("brand")
-    qp_brand = qp_brand if qp_brand in BRANDS else BRANDS[0]
-    st.session_state.setdefault("profile_brand", qp_brand)
+    st.session_state.setdefault("profile_brand", qp_brand if qp_brand in BRANDS else BRANDS[0])
 
-    # Profile inputs (always editable by each user)
+    # Keep last saved to detect changes
+    st.session_state.setdefault("prev_profile_name", st.session_state["profile_name"])
+    st.session_state.setdefault("prev_profile_brand", st.session_state["profile_brand"])
+
+    # Editable profile inputs
     profile_name = st.text_input("Your Name (default)", key="profile_name")
     profile_brand = st.selectbox("Your Brand (default)", options=BRANDS, key="profile_brand")
 
+    # If either changed, immediately persist to URL (so bookmarks work), and update prev_* trackers
+    if (st.session_state["profile_name"] != st.session_state["prev_profile_name"]) or (st.session_state["profile_brand"] != st.session_state["prev_profile_brand"]):
+        set_qp(name=st.session_state["profile_name"], brand=st.session_state["profile_brand"])
+        st.session_state["prev_profile_name"] = st.session_state["profile_name"]
+        st.session_state["prev_profile_brand"] = st.session_state["profile_brand"]
+        st.caption("✅ Profile saved to this URL. Bookmark it to keep your defaults.")
+
+    # Quick actions
     colp1, colp2 = st.columns(2)
     with colp1:
-        if st.button("Save profile"):
-            # Persist to URL for easy bookmarking (this device)
-            set_qp(name=st.session_state["profile_name"], brand=st.session_state["profile_brand"])
-            st.success("Profile saved for this session. Bookmark this page to keep defaults.")
+        if st.button("Reset to profile now"):
+            st.session_state["locked_by"] = st.session_state["profile_name"]
+            st.session_state["brand"] = st.session_state["profile_brand"]
+            st.success("Form defaults synced from your profile.")
     with colp2:
-        if st.button("Clear profile"):
+        if st.button("Clear profile (this device)"):
             st.session_state["profile_name"] = ""
             st.session_state["profile_brand"] = BRANDS[0]
             set_qp(name="", brand="")
+            st.session_state["prev_profile_name"] = ""
+            st.session_state["prev_profile_brand"] = BRANDS[0]
             st.info("Profile cleared.")
 
     # --- Admin tools ---
@@ -168,7 +179,6 @@ with st.sidebar:
 # AUTH
 # ----------------------------
 def get_credentials():
-    # Prefer Streamlit secrets (for Streamlit Cloud)
     if hasattr(st, "secrets") and "gcp_service_account" in st.secrets:
         service_account_info = dict(st.secrets["gcp_service_account"])
         scopes = [
@@ -176,7 +186,6 @@ def get_credentials():
             "https://www.googleapis.com/auth/drive",
         ]
         return Credentials.from_service_account_info(service_account_info, scopes=scopes)
-    # Fallback to local file
     if os.path.exists("service_account.json"):
         scopes = [
             "https://www.googleapis.com/auth/spreadsheets",
@@ -204,31 +213,21 @@ def open_sheet(url: str):
     return ws, sh
 
 def find_duplicates(df, company_n, email_n, phone_n, domain, fuzzy_threshold):
-    """Return list of (label, dataframe) duplicate hits and a combined dataframe for final review."""
     hits = []
-
     if df.empty:
         return hits, pd.DataFrame(columns=df.columns)
-
-    # Exact email
     if email_n:
         exact_email = df[df["_email_n"] == email_n]
         if not exact_email.empty:
             hits.append(("Exact email", exact_email))
-
-    # Exact phone
     if phone_n:
         exact_phone = df[df["_phone_n"] == phone_n]
         if not exact_phone.empty:
             hits.append(("Exact phone", exact_phone))
-
-    # Domain match
     if domain:
         dom_df = df[df["_domain"] == domain]
         if not dom_df.empty:
             hits.append((f"Same email domain @{domain}", dom_df))
-
-    # Fuzzy company
     if company_n and HAS_RAPIDFUZZ:
         uniq_companies = df["_company_n"].dropna().unique().tolist()
         matched_vals = []
@@ -242,8 +241,6 @@ def find_duplicates(df, company_n, email_n, phone_n, domain, fuzzy_threshold):
             fuzzy_df = df[df["_company_n"].isin(set(matched_vals))]
             if not fuzzy_df.empty:
                 hits.append((f"Fuzzy company ≥{fuzzy_threshold}", fuzzy_df))
-
-    # Build combined (sort newest first)
     if hits:
         parts = [h[1] for h in hits]
         combined = pd.concat(parts, axis=0).drop_duplicates()
@@ -260,17 +257,14 @@ if not 'confirm_sig' in st.session_state:
 if not 'confirm_ready' in st.session_state:
     st.session_state['confirm_ready'] = False
 
-# Initialize form state keys if not set
 for key in ["company","contact_name","email","phone","notes","brand","locked_by"]:
     st.session_state.setdefault(key, "")
 
-# Prefill locked_by/brand from saved profile if empty
+# Prefill from profile if empty
 if not st.session_state.get("locked_by") and st.session_state.get("profile_name"):
     st.session_state["locked_by"] = st.session_state["profile_name"]
-if (not st.session_state.get("brand")) and st.session_state.get("profile_brand") in BRANDS:
-    st.session_state["brand"] = st.session_state["profile_brand"]
-elif not st.session_state.get("brand"):
-    st.session_state["brand"] = BRANDS[0]
+if not st.session_state.get("brand"):
+    st.session_state["brand"] = st.session_state.get("profile_brand", BRANDS[0])
 
 if not default_url and not 'sheet_url' in locals():
     sheet_url = ""
@@ -293,7 +287,6 @@ df = pd.DataFrame(rows, columns=["Timestamp","Date","Company","Contact Name","Em
 
 if not df.empty:
     df["Timestamp"] = pd.to_datetime(df["Timestamp"], errors="coerce")
-    # Precompute normalized columns
     df["_company_n"] = df["Company"].astype(str).apply(normalize_text)
     df["_email_n"] = df["Email"].astype(str).apply(normalize_text)
     df["_domain"] = df["Email"].astype(str).apply(email_domain)
@@ -315,10 +308,10 @@ def get_or_create_archive(sh):
 
 def admin_clear_today():
     today_str = now_in_tz().strftime("%Y-%m-%d")
-    values = ws.get_all_values()  # includes header
+    values = ws.get_all_values()
     to_delete = []
     for idx, row in enumerate(values[1:], start=2):
-        if len(row) >= 2 and row[1] == today_str:  # column B is Date
+        if len(row) >= 2 and row[1] == today_str:
             to_delete.append(idx)
     if not to_delete:
         return "No rows for today to delete."
@@ -332,12 +325,12 @@ def admin_clear_all():
 
 def admin_archive_today_and_clear():
     today_str = now_in_tz().strftime("%Y-%m-%d")
-    values = ws.get_all_values()  # includes header
+    values = ws.get_all_values()
     rows_to_archive = []
     row_numbers = []
     for idx, row in enumerate(values[1:], start=2):
         if len(row) >= 2 and row[1] == today_str:
-            rows_to_archive.append(row[:9])  # A..I
+            rows_to_archive.append(row[:9])
             row_numbers.append(idx)
     if not rows_to_archive:
         return "No rows for today to archive."
@@ -351,26 +344,21 @@ def admin_archive_all_and_clear():
     values = ws.get_all_values()
     if len(values) <= 1:
         return "No data rows to archive."
-    data_rows = [row[:9] for row in values[1:]]  # A..I
+    data_rows = [row[:9] for row in values[1:]]
     arch = get_or_create_archive(sh)
     arch.append_rows(data_rows, value_input_option="USER_ENTERED")
     ws.delete_rows(2, ws.row_count)
     return f"Archived and cleared {len(data_rows)} row(s)."
 
-# Execute admin actions if requested
 if 'is_admin' in locals() and is_admin:
     if 'reset_today' in locals() and reset_today:
-        st.success(admin_clear_today())
-        st.experimental_rerun()
+        st.success(admin_clear_today()); st.experimental_rerun()
     if 'reset_all' in locals() and reset_all:
-        st.success(admin_clear_all())
-        st.experimental_rerun()
+        st.success(admin_clear_all()); st.experimental_rerun()
     if 'archive_today' in locals() and archive_today:
-        st.success(admin_archive_today_and_clear())
-        st.experimental_rerun()
+        st.success(admin_archive_today_and_clear()); st.experimental_rerun()
     if 'archive_all' in locals() and archive_all:
-        st.success(admin_archive_all_and_clear())
-        st.experimental_rerun()
+        st.success(admin_archive_all_and_clear()); st.experimental_rerun()
 
 # ----------------------------
 # Form: Lock a contact
@@ -382,7 +370,6 @@ def clear_form_fields():
         st.session_state[key] = ""
 
 with st.form("lock_form", clear_on_submit=False):
-    # Full-width live alert placeholder at top of form
     live_alert = st.empty()
 
     col1, col2, col3 = st.columns([1.3,1,1])
@@ -395,19 +382,14 @@ with st.form("lock_form", clear_on_submit=False):
 
         st.markdown(" ")
         if st.form_submit_button("🧽 Clear form (Company/Contact/Email/Phone/Notes)", help="Does not clear your profile, brand, or name."):
-            clear_form_fields()
-            st.experimental_rerun()
+            clear_form_fields(); st.experimental_rerun()
 
     with col2:
-        # Brand is always user-choosable, defaulting to saved profile or first brand
-        # key="brand" keeps selection stable across reruns
         brand = st.selectbox("Your Brand *", BRANDS, key="brand")
-        # Prefill locked_by from profile if empty; users can type freely
         if not st.session_state.get("locked_by") and st.session_state.get("profile_name"):
             st.session_state["locked_by"] = st.session_state["profile_name"]
         locked_by = st.text_input("Your Name *", key="locked_by")
-        st.markdown(" ")
-        st.markdown("**Duplicate Check (live)**")
+        st.markdown(" "); st.markdown("**Duplicate Check (live)**")
 
     with col3:
         st.markdown("**Match Signals**")
@@ -429,13 +411,11 @@ with st.form("lock_form", clear_on_submit=False):
         else:
             st.success("✅ No duplicates found yet on company/email/phone/domain checks.")
 
-    # Show a big top-of-form banner if live duplicates detected (more obvious)
     if live_hits:
         live_alert.error("🚨 Potential duplicate(s) detected based on what you've typed. Please review before locking.")
 
     submitted = st.form_submit_button("🔒 Lock Contact")
 
-    # Final submit logic with two-step confirm
     if submitted:
         company = st.session_state["company"]
         contact_name = st.session_state["contact_name"]
@@ -445,30 +425,25 @@ with st.form("lock_form", clear_on_submit=False):
         brand = st.session_state["brand"]
         locked_by = st.session_state["locked_by"]
 
-        # Basic required checks
         if not company or not contact_name or not brand or not locked_by:
             st.warning("Please fill in all *required* fields.")
         elif not email and not phone:
             st.warning("Please provide at least an Email or a Phone number.")
         else:
-            # Recompute duplicates on submit for safety
             hits, combined = find_duplicates(df, normalize_text(company), normalize_text(email), normalize_phone(phone), email_domain(email), fuzzy_threshold)
             sig = f"{normalize_text(email)}|{normalize_phone(phone)}|{normalize_text(company)}"
 
             if hits and (st.session_state.get('confirm_sig') != sig or not st.session_state.get('confirm_ready', False)):
-                # First submit with duplicates -> show blocking banner
                 st.session_state['confirm_sig'] = sig
                 st.session_state['confirm_ready'] = True
                 st.error("⚠ Potential duplicate(s) detected — please review the matches above. "
                          "If you still want to proceed, click **Lock Contact** again to confirm.")
-                # Also render duplicates table full width for emphasis
                 if not combined.empty:
                     st.dataframe(
                         combined[["Timestamp","Company","Contact Name","Email","Phone","Brand","Locked By","Notes"]],
                         use_container_width=True
                     )
             else:
-                # Either no duplicates OR user confirmed by clicking again with same signature
                 try:
                     ts = now_in_tz()
                     date_str = ts.strftime("%Y-%m-%d")
@@ -476,17 +451,14 @@ with st.form("lock_form", clear_on_submit=False):
                     new_row = [ts_iso, date_str, company.strip(), contact_name.strip(), email.strip(), phone.strip(), brand, locked_by.strip(), notes.strip()]
                     ws.append_row(new_row, value_input_option="USER_ENTERED")
                     st.success("Contact locked for today. Visible to all teams now.")
-                    # Reset confirmation state
                     st.session_state['confirm_sig'] = None
                     st.session_state['confirm_ready'] = False
-                    # Clear form fields AFTER successful save
-                    clear_form_fields()
-                    st.experimental_rerun()
+                    clear_form_fields(); st.experimental_rerun()
                 except Exception as e:
                     st.error(f"Failed to save. Details: {e}")
 
 # ----------------------------
-# TODAY VIEW
+# Today view
 # ----------------------------
 st.subheader("Today’s Locks (Live)")
 with st.expander("Filters", expanded=True):
@@ -516,7 +488,6 @@ if not df.empty:
         qn = normalize_phone(q_phone)
         today_df = today_df[today_df["_phone_n"].str.contains(qn, na=False)]
 
-    # Mark dupes within today (same email OR same phone OR same company norm)
     if not today_df.empty:
         today_df["Dup Today?"] = (
             today_df.duplicated(subset=["_email_n"], keep="first") |
