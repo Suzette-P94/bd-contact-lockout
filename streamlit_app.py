@@ -129,15 +129,11 @@ with st.sidebar:
         st.session_state["prev_profile_brand"] = st.session_state["profile_brand"]
         st.caption("✅ Profile saved to this URL. Bookmark it to keep your defaults.")
 
-    # Quick actions
-    colp1, colp2 = st.columns(2)
-    with colp1:
-        if st.button("Reset to profile now"):
-            st.session_state["locked_by"] = st.session_state["profile_name"]
-            st.session_state["brand"] = st.session_state["profile_brand"]
-            st.success("Form defaults synced from your profile.")
-    with colp2:
-    pass  # placeholder to avoid IndentationError
+    # Quick action: sync profile into the form right now
+    if st.button("Reset to profile now"):
+        st.session_state["locked_by"] = st.session_state["profile_name"]
+        st.session_state["brand"] = st.session_state["profile_brand"]
+        st.success("Form defaults synced from your profile.")
 
     # --- Admin tools ---
     st.markdown("---")
@@ -246,9 +242,9 @@ def find_duplicates(df, company_n, email_n, phone_n, domain, fuzzy_threshold):
 # ----------------------------
 # Early exit if no sheet
 # ----------------------------
-if not 'confirm_sig' in st.session_state:
+if 'confirm_sig' not in st.session_state:
     st.session_state['confirm_sig'] = None
-if not 'confirm_ready' in st.session_state:
+if 'confirm_ready' not in st.session_state:
     st.session_state['confirm_ready'] = False
 
 for key in ["company","contact_name","email","phone","notes","brand","locked_by"]:
@@ -260,7 +256,7 @@ if not st.session_state.get("locked_by") and st.session_state.get("profile_name"
 if not st.session_state.get("brand"):
     st.session_state["brand"] = st.session_state.get("profile_brand", BRANDS[0])
 
-if not default_url and not 'sheet_url' in locals():
+if not default_url and 'sheet_url' not in locals():
     sheet_url = ""
 
 if not sheet_url:
