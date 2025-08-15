@@ -19,8 +19,10 @@ st.set_page_config(page_title="BD Day – Contact Lockout", page_icon="📞", la
 st.title("📞 BD Day – Contact Lockout")
 st.caption("Lock before you dial. Everyone sees locks instantly across brands. Duplicate checks: exact email/phone, domain match, fuzzy company (optional).")
 
+BRANDS = ["Dartmouth Partners","Catalyst Partners","Pure Search","Other"]
+
 # ----------------------------
-# SETTINGS (SIDEBAR)
+# SETTINGS (SIDEBAR) + SIGN-UP
 # ----------------------------
 with st.sidebar:
     st.header("Settings")
@@ -50,6 +52,43 @@ with st.sidebar:
     tz_name = st.selectbox("Timezone", ["Europe/London", "UTC"], index=0)
     fuzzy_threshold = st.slider("Fuzzy company match threshold", min_value=70, max_value=95, value=82, help="Higher = stricter matches")
 
+    st.markdown("---")
+    st.subheader("Your profile (Remember me)")
+    # Load from URL params if present (so users can bookmark a personalized link)
+    try:
+        params = st.experimental_get_query_params()
+    except Exception:
+        params = {}
+    if 'profile_name' not in st.session_state:
+        st.session_state['profile_name'] = params.get('name', [''])[0] if params else ''
+    if 'profile_brand' not in st.session_state:
+        url_brand = params.get('brand', [''])[0] if params else ''
+        st.session_state['profile_brand'] = url_brand if url_brand in BRANDS else ''
+
+    profile_name = st.text_input("Your Name (default)", value=st.session_state['profile_name'], key="profile_name")
+    profile_brand = st.selectbox("Your Brand (default)", options=[''] + BRANDS,
+                                 index=([''] + BRANDS).index(st.session_state['profile_brand']) if st.session_state['profile_brand'] in BRANDS else 0,
+                                 key="profile_brand")
+
+    colp1, colp2 = st.columns(2)
+    with colp1:
+        if st.button("Save profile"):
+            # Persist in URL so a bookmark works for this device
+            try:
+                st.experimental_set_query_params(name=st.session_state['profile_name'], brand=st.session_state['profile_brand'])
+            except Exception:
+                pass
+            st.success("Profile saved for this session. Bookmark the page to keep defaults.")
+    with colp2:
+        if st.button("Clear profile"):
+            st.session_state['profile_name'] = ''
+            st.session_state['profile_brand'] = ''
+            try:
+                st.experimental_set_query_params()  # clear URL params
+            except Exception:
+                pass
+            st.info("Profile cleared.")
+
     # --- Admin tools ---
     st.markdown("---")
     st.subheader("Admin tools")
@@ -76,7 +115,7 @@ with st.sidebar:
         with col_b:
             reset_all = st.button("🧨 Reset ALL locks (keep header)", use_container_width=True)
             archive_all = st.button("📦 Archive ALL to 'Archive' + Clear", use_container_width=True)
-        st.caption("Actions are permanent. Consider duplicating the sheet for archival first (Archive buttons will copy rows to an 'Archive' worksheet).")
+        st.caption("Archive buttons copy rows to an 'Archive' worksheet before clearing.")
     else:
         st.info("Enter Admin PIN to enable reset/archival actions.")
 
@@ -202,6 +241,16 @@ if not 'confirm_sig' in st.session_state:
 if not 'confirm_ready' in st.session_state:
     st.session_state['confirm_ready'] = False
 
+# Initialize form state keys if not set
+for key in ["company","contact_name","email","phone","notes","brand","locked_by"]:
+    st.session_state.setdefault(key, "")
+
+# Prefill locked_by/brand from saved profile on first load (if empty)
+if not st.session_state.get("locked_by") and st.session_state.get("profile_name"):
+    st.session_state["locked_by"] = st.session_state["profile_name"]
+if not st.session_state.get("brand") and st.session_state.get("profile_brand"):
+    st.session_state["brand"] = st.session_state["profile_brand"]
+
 if not default_url and not 'sheet_url' in locals():
     # If we somehow didn't set sheet_url (shouldn't happen), set to empty to trigger warning below
     sheet_url = ""
@@ -308,28 +357,43 @@ if 'is_admin' in locals() and is_admin:
 # ----------------------------
 st.subheader("Lock a Contact")
 
+def clear_form_fields():
+    for key in ["company","contact_name","email","phone","notes"]:
+        st.session_state[key] = ""
+
 with st.form("lock_form", clear_on_submit=False):
     # Full-width live alert placeholder at top of form
     live_alert = st.empty()
 
     col1, col2, col3 = st.columns([1.3,1,1])
     with col1:
-        company = st.text_input("Company *")
-        contact_name = st.text_input("Contact Name *")
-        email = st.text_input("Email (recommended)")
-        phone = st.text_input("Phone")
-        notes = st.text_area("Notes (optional)", height=72)
+        company = st.text_input("Company *", key="company")
+        contact_name = st.text_input("Contact Name *", key="contact_name")
+        email = st.text_input("Email (recommended)", key="email")
+        phone = st.text_input("Phone", key="phone")
+        notes = st.text_area("Notes (optional)", height=72, key="notes")
+
+        st.markdown(" ")
+        if st.form_submit_button("🧽 Clear form (Company/Contact/Email/Phone/Notes)", help="Does not clear your profile, brand, or name."):
+            clear_form_fields()
+            st.experimental_rerun()
+
     with col2:
-        brand = st.selectbox("Your Brand *", ["Dartmouth Partners","Catalyst Partners","Pure Search","Other"])
-        locked_by = st.text_input("Your Name *", value="")
+        # Set default brand from profile on first render
+        default_idx = BRANDS.index(st.session_state["profile_brand"]) if st.session_state.get("profile_brand") in BRANDS else 0
+        brand = st.selectbox("Your Brand *", BRANDS, index=default_idx, key="brand")
+        # Prefill locked_by from profile (value only used first time; key keeps state afterwards)
+        if "locked_by" not in st.session_state or not st.session_state["locked_by"]:
+            st.session_state["locked_by"] = st.session_state.get("profile_name","")
+        locked_by = st.text_input("Your Name *", key="locked_by")
         st.markdown(" ")
         st.markdown("**Duplicate Check (live)**")
     with col3:
         st.markdown("**Match Signals**")
-        check_company = normalize_text(company)
-        check_email = normalize_text(email)
-        check_domain = email_domain(email)
-        check_phone = normalize_phone(phone)
+        check_company = normalize_text(st.session_state["company"])
+        check_email = normalize_text(st.session_state["email"])
+        check_domain = email_domain(st.session_state["email"])
+        check_phone = normalize_phone(st.session_state["phone"])
 
         live_hits, live_combined = find_duplicates(df, check_company, check_email, check_phone, check_domain, fuzzy_threshold)
 
@@ -352,6 +416,14 @@ with st.form("lock_form", clear_on_submit=False):
 
     # Final submit logic with two-step confirm
     if submitted:
+        company = st.session_state["company"]
+        contact_name = st.session_state["contact_name"]
+        email = st.session_state["email"]
+        phone = st.session_state["phone"]
+        notes = st.session_state["notes"]
+        brand = st.session_state["brand"]
+        locked_by = st.session_state["locked_by"]
+
         # Basic required checks
         if not company or not contact_name or not brand or not locked_by:
             st.warning("Please fill in all *required* fields.")
@@ -359,8 +431,8 @@ with st.form("lock_form", clear_on_submit=False):
             st.warning("Please provide at least an Email or a Phone number.")
         else:
             # Recompute duplicates on submit for safety
-            hits, combined = find_duplicates(df, check_company, check_email, check_phone, check_domain, fuzzy_threshold)
-            sig = f"{check_email}|{check_phone}|{check_company}"
+            hits, combined = find_duplicates(df, normalize_text(company), normalize_text(email), normalize_phone(phone), email_domain(email), fuzzy_threshold)
+            sig = f"{normalize_text(email)}|{normalize_phone(phone)}|{normalize_text(company)}"
 
             if hits and (st.session_state.get('confirm_sig') != sig or not st.session_state.get('confirm_ready', False)):
                 # First submit with duplicates -> show blocking banner
@@ -386,6 +458,8 @@ with st.form("lock_form", clear_on_submit=False):
                     # Reset confirmation state
                     st.session_state['confirm_sig'] = None
                     st.session_state['confirm_ready'] = False
+                    # Clear form fields AFTER successful save
+                    clear_form_fields()
                     st.experimental_rerun()
                 except Exception as e:
                     st.error(f"Failed to save. Details: {e}")
@@ -401,7 +475,7 @@ with st.expander("Filters", expanded=True):
     with c2:
         q_email = st.text_input("Filter by Email")
     with c3:
-        brand_filter = st.multiselect("Filter by Brand", ["Dartmouth Partners","Catalyst Partners","Pure Search","Other"])
+        brand_filter = st.multiselect("Filter by Brand", BRANDS)
     with c4:
         q_phone = st.text_input("Filter by Phone (digits only)")
 
