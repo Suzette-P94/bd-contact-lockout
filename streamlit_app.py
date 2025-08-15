@@ -158,15 +158,18 @@ def open_sheet(url: str):
     return ws, sh
 
 # ----------------------------
-# Load / prepare data
+# Session state init
 # ----------------------------
-if not 'confirm_sig' in st.session_state:
+if 'confirm_sig' not in st.session_state:
     st.session_state['confirm_sig'] = None
-if not 'confirm_ready' in st.session_state:
+if 'confirm_ready' not in st.session_state:
     st.session_state['confirm_ready'] = False
 
 for key in ["company","contact_name","email","phone","notes"]:
     st.session_state.setdefault(key, "")
+
+# form reset flag (pre-render clearing)
+st.session_state.setdefault("_do_clear_form", False)
 
 # Pull profile from URL if present (bypass popup on bookmarked link)
 if 'profile_name' not in st.session_state:
@@ -332,13 +335,20 @@ def find_duplicates(df, company_n, email_n, phone_n, domain):
     return hits, combined
 
 # ----------------------------
+# Pre-render form clear (IMPORTANT: before widgets)
+# ----------------------------
+if st.session_state.get("_do_clear_form"):
+    for _k in ["company","contact_name","email","phone","notes"]:
+        st.session_state[_k] = ""
+    st.session_state["_do_clear_form"] = False
+
+def request_clear_form():
+    st.session_state["_do_clear_form"] = True
+
+# ----------------------------
 # Main form layout: two columns
 # ----------------------------
 st.subheader("Lock a Contact")
-
-def clear_form_fields():
-    for key in ["company","contact_name","email","phone","notes"]:
-        st.session_state[key] = ""
 
 with st.form("lock_form", clear_on_submit=False):
     live_alert = st.empty()
@@ -353,7 +363,7 @@ with st.form("lock_form", clear_on_submit=False):
 
         st.markdown(" ")
         if st.form_submit_button("🧽 Clear form (Company/Contact/Email/Phone/Notes)"):
-            clear_form_fields(); st.experimental_rerun()
+            request_clear_form(); st.experimental_rerun()
 
     with right:
         st.markdown("**Match Signals**")
@@ -421,7 +431,7 @@ with st.form("lock_form", clear_on_submit=False):
                     st.success("Contact locked for today. Visible to all teams now.")
                     st.session_state['confirm_sig'] = None
                     st.session_state['confirm_ready'] = False
-                    clear_form_fields(); st.experimental_rerun()
+                    request_clear_form(); st.experimental_rerun()
                 except Exception as e:
                     st.error(f"Failed to save. Details: {e}")
 
