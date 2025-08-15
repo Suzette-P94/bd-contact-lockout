@@ -17,7 +17,7 @@ except Exception:
 
 st.set_page_config(page_title="BD Day – Contact Lockout", page_icon="📞", layout="wide")
 st.title("📞 BD Day – Contact Lockout")
-st.caption("Lock before you dial. Everyone sees locks instantly across brands. Duplicate checks: exact email/phone, domain match, fuzzy company (optional).")
+st.caption("Lock before you dial. Everyone sees locks instantly across brands. Duplicate checks: exact email/phone and fuzzy company (optional).")
 
 # ----------------------------
 # Constants & helpers
@@ -309,11 +309,8 @@ def find_duplicates(df, company_n, email_n, phone_n, domain):
         exact_phone = df[df["_phone_n"] == phone_n]
         if not exact_phone.empty:
             hits.append(("Exact phone", exact_phone))
-    if domain:
-        dom_df = df[df["_domain"] == domain]
-        if not dom_df.empty:
-            hits.append((f"Same email domain @{domain}", dom_df))
-    if company_n and HAS_RAPIDFUZZ:
+    # Domain matches are informative only; no duplicate flagging
+if company_n and HAS_RAPIDFUZZ:
         uniq_companies = df["_company_n"].dropna().unique().tolist()
         matched_vals = []
         for comp in uniq_companies:
@@ -383,7 +380,7 @@ with st.form("lock_form", clear_on_submit=False):
                     use_container_width=True
                 )
         else:
-            st.success("✅ No duplicates found yet on company/email/phone/domain checks.")
+            st.success("✅ No duplicates found yet on company/email/phone checks.")
 
     if live_hits:
         live_alert.error("🚨 Potential duplicate(s) detected based on what you've typed. Please review before locking.")
@@ -482,4 +479,4 @@ else:
     st.info("No locks yet.")
 
 st.markdown("---")
-st.caption(f"Signals used: exact email/phone, same email domain, fuzzy company match (threshold {FUZZY_THRESHOLD}).")
+st.caption(f"Signals used: exact email/phone and fuzzy company match (threshold 82).
