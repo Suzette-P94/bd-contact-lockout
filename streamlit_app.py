@@ -22,6 +22,62 @@ st.caption("Lock before you dial. Everyone sees locks instantly across brands. D
 BRANDS = ["Dartmouth Partners","Catalyst Partners","Pure Search","Other"]
 
 # ----------------------------
+# Helpers
+# ----------------------------
+def now_in_tz(tz="Europe/London"):
+    try:
+        import zoneinfo
+        z = zoneinfo.ZoneInfo(tz)
+        return datetime.now(tz=z)
+    except Exception:
+        return datetime.now(timezone.utc)
+
+def normalize_text(x: str) -> str:
+    if not x:
+        return ""
+    return " ".join(str(x).strip().lower().split())
+
+def normalize_phone(p: str) -> str:
+    if not p:
+        return ""
+    return "".join(ch for ch in str(p) if ch.isdigit())
+
+def email_domain(email: str) -> str:
+    if not email:
+        return ""
+    e = str(email).strip().lower()
+    if "@" in e:
+        return e.split("@", 1)[1]
+    return ""
+
+def get_qp(key: str) -> str:
+    """Safe read of query param for modern Streamlit API."""
+    try:
+        qp = st.query_params
+        v = qp.get(key, "")
+        # If Streamlit returns a list, pick first
+        if isinstance(v, list):
+            return v[0] if v else ""
+        return v or ""
+    except Exception:
+        return ""
+
+def set_qp(**kwargs):
+    """Safe set of query params; clears keys when value is empty."""
+    try:
+        # Build new dict from existing
+        qp = dict(st.query_params)
+        for k, v in kwargs.items():
+            if v:
+                qp[k] = v
+            else:
+                qp.pop(k, None)
+        st.query_params.clear()
+        st.query_params.update(qp)
+    except Exception:
+        pass
+
+# ----------------------------
 # SETTINGS (SIDEBAR) + SIGN-UP
 # ----------------------------
 with st.sidebar:
@@ -54,39 +110,28 @@ with st.sidebar:
 
     st.markdown("---")
     st.subheader("Your profile (Remember me)")
-    # Load from URL params if present (so users can bookmark a personalized link)
-    try:
-        params = st.experimental_get_query_params()
-    except Exception:
-        params = {}
-    if 'profile_name' not in st.session_state:
-        st.session_state['profile_name'] = params.get('name', [''])[0] if params else ''
-    if 'profile_brand' not in st.session_state:
-        url_brand = params.get('brand', [''])[0] if params else ''
-        st.session_state['profile_brand'] = url_brand if url_brand in BRANDS else ''
 
-    profile_name = st.text_input("Your Name (default)", value=st.session_state['profile_name'], key="profile_name")
-    profile_brand = st.selectbox("Your Brand (default)", options=[''] + BRANDS,
-                                 index=([''] + BRANDS).index(st.session_state['profile_brand']) if st.session_state['profile_brand'] in BRANDS else 0,
-                                 key="profile_brand")
+    # Initialize profile state with query params or sensible defaults
+    st.session_state.setdefault("profile_name", get_qp("name"))
+    qp_brand = get_qp("brand")
+    qp_brand = qp_brand if qp_brand in BRANDS else BRANDS[0]
+    st.session_state.setdefault("profile_brand", qp_brand)
+
+    # Profile inputs (always editable by each user)
+    profile_name = st.text_input("Your Name (default)", key="profile_name")
+    profile_brand = st.selectbox("Your Brand (default)", options=BRANDS, key="profile_brand")
 
     colp1, colp2 = st.columns(2)
     with colp1:
         if st.button("Save profile"):
-            # Persist in URL so a bookmark works for this device
-            try:
-                st.experimental_set_query_params(name=st.session_state['profile_name'], brand=st.session_state['profile_brand'])
-            except Exception:
-                pass
-            st.success("Profile saved for this session. Bookmark the page to keep defaults.")
+            # Persist to URL for easy bookmarking (this device)
+            set_qp(name=st.session_state["profile_name"], brand=st.session_state["profile_brand"])
+            st.success("Profile saved for this session. Bookmark this page to keep defaults.")
     with colp2:
         if st.button("Clear profile"):
-            st.session_state['profile_name'] = ''
-            st.session_state['profile_brand'] = ''
-            try:
-                st.experimental_set_query_params()  # clear URL params
-            except Exception:
-                pass
+            st.session_state["profile_name"] = ""
+            st.session_state["profile_brand"] = BRANDS[0]
+            set_qp(name="", brand="")
             st.info("Profile cleared.")
 
     # --- Admin tools ---
@@ -158,32 +203,6 @@ def open_sheet(url: str):
         )
     return ws, sh
 
-def now_in_tz(tz="Europe/London"):
-    try:
-        import zoneinfo
-        z = zoneinfo.ZoneInfo(tz)
-        return datetime.now(tz=z)
-    except Exception:
-        return datetime.now(timezone.utc)
-
-def normalize_text(x: str) -> str:
-    if not x:
-        return ""
-    return " ".join(str(x).strip().lower().split())
-
-def normalize_phone(p: str) -> str:
-    if not p:
-        return ""
-    return "".join(ch for ch in str(p) if ch.isdigit())
-
-def email_domain(email: str) -> str:
-    if not email:
-        return ""
-    e = str(email).strip().lower()
-    if "@" in e:
-        return e.split("@", 1)[1]
-    return ""
-
 def find_duplicates(df, company_n, email_n, phone_n, domain, fuzzy_threshold):
     """Return list of (label, dataframe) duplicate hits and a combined dataframe for final review."""
     hits = []
@@ -234,7 +253,7 @@ def find_duplicates(df, company_n, email_n, phone_n, domain, fuzzy_threshold):
     return hits, combined
 
 # ----------------------------
-# EARLY EXIT IF NO SHEET
+# Early exit if no sheet
 # ----------------------------
 if not 'confirm_sig' in st.session_state:
     st.session_state['confirm_sig'] = None
@@ -245,14 +264,15 @@ if not 'confirm_ready' in st.session_state:
 for key in ["company","contact_name","email","phone","notes","brand","locked_by"]:
     st.session_state.setdefault(key, "")
 
-# Prefill locked_by/brand from saved profile on first load (if empty)
+# Prefill locked_by/brand from saved profile if empty
 if not st.session_state.get("locked_by") and st.session_state.get("profile_name"):
     st.session_state["locked_by"] = st.session_state["profile_name"]
-if not st.session_state.get("brand") and st.session_state.get("profile_brand"):
+if (not st.session_state.get("brand")) and st.session_state.get("profile_brand") in BRANDS:
     st.session_state["brand"] = st.session_state["profile_brand"]
+elif not st.session_state.get("brand"):
+    st.session_state["brand"] = BRANDS[0]
 
 if not default_url and not 'sheet_url' in locals():
-    # If we somehow didn't set sheet_url (shouldn't happen), set to empty to trigger warning below
     sheet_url = ""
 
 if not sheet_url:
@@ -260,7 +280,7 @@ if not sheet_url:
     st.stop()
 
 # ----------------------------
-# LOAD EXISTING DATA
+# Load existing data
 # ----------------------------
 try:
     ws, sh = open_sheet(sheet_url)
@@ -283,7 +303,7 @@ else:
                                "_company_n","_email_n","_domain","_phone_n"])
 
 # ----------------------------
-# ADMIN RESET/ARCHIVE ACTIONS
+# Admin reset/archive actions
 # ----------------------------
 def get_or_create_archive(sh):
     try:
@@ -294,7 +314,7 @@ def get_or_create_archive(sh):
     return arch
 
 def admin_clear_today():
-    today_str = now_in_tz(tz_name).strftime("%Y-%m-%d")
+    today_str = now_in_tz().strftime("%Y-%m-%d")
     values = ws.get_all_values()  # includes header
     to_delete = []
     for idx, row in enumerate(values[1:], start=2):
@@ -311,7 +331,7 @@ def admin_clear_all():
     return "All locks cleared (header preserved)."
 
 def admin_archive_today_and_clear():
-    today_str = now_in_tz(tz_name).strftime("%Y-%m-%d")
+    today_str = now_in_tz().strftime("%Y-%m-%d")
     values = ws.get_all_values()  # includes header
     rows_to_archive = []
     row_numbers = []
@@ -353,7 +373,7 @@ if 'is_admin' in locals() and is_admin:
         st.experimental_rerun()
 
 # ----------------------------
-# FORM: LOCK A CONTACT
+# Form: Lock a contact
 # ----------------------------
 st.subheader("Lock a Contact")
 
@@ -379,15 +399,16 @@ with st.form("lock_form", clear_on_submit=False):
             st.experimental_rerun()
 
     with col2:
-        # Set default brand from profile on first render
-        default_idx = BRANDS.index(st.session_state["profile_brand"]) if st.session_state.get("profile_brand") in BRANDS else 0
-        brand = st.selectbox("Your Brand *", BRANDS, index=default_idx, key="brand")
-        # Prefill locked_by from profile (value only used first time; key keeps state afterwards)
-        if "locked_by" not in st.session_state or not st.session_state["locked_by"]:
-            st.session_state["locked_by"] = st.session_state.get("profile_name","")
+        # Brand is always user-choosable, defaulting to saved profile or first brand
+        # key="brand" keeps selection stable across reruns
+        brand = st.selectbox("Your Brand *", BRANDS, key="brand")
+        # Prefill locked_by from profile if empty; users can type freely
+        if not st.session_state.get("locked_by") and st.session_state.get("profile_name"):
+            st.session_state["locked_by"] = st.session_state["profile_name"]
         locked_by = st.text_input("Your Name *", key="locked_by")
         st.markdown(" ")
         st.markdown("**Duplicate Check (live)**")
+
     with col3:
         st.markdown("**Match Signals**")
         check_company = normalize_text(st.session_state["company"])
@@ -449,7 +470,7 @@ with st.form("lock_form", clear_on_submit=False):
             else:
                 # Either no duplicates OR user confirmed by clicking again with same signature
                 try:
-                    ts = now_in_tz(tz_name)
+                    ts = now_in_tz()
                     date_str = ts.strftime("%Y-%m-%d")
                     ts_iso = ts.strftime("%Y-%m-%d %H:%M:%S")
                     new_row = [ts_iso, date_str, company.strip(), contact_name.strip(), email.strip(), phone.strip(), brand, locked_by.strip(), notes.strip()]
@@ -480,7 +501,7 @@ with st.expander("Filters", expanded=True):
         q_phone = st.text_input("Filter by Phone (digits only)")
 
 if not df.empty:
-    today_str = now_in_tz(tz_name).strftime("%Y-%m-%d")
+    today_str = now_in_tz().strftime("%Y-%m-%d")
     today_df = df[df["Date"] == today_str].copy()
 
     if q_company:
@@ -499,7 +520,7 @@ if not df.empty:
     if not today_df.empty:
         today_df["Dup Today?"] = (
             today_df.duplicated(subset=["_email_n"], keep="first") |
-            today_df.duplicated(subset=["_phone_n"], keep="first") |
+            today_df.uplicated(subset=["_phone_n"], keep="first") |
             today_df.duplicated(subset=["_company_n"], keep="first")
         )
 
