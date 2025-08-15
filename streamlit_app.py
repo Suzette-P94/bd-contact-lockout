@@ -49,10 +49,34 @@ with st.sidebar:
 
     tz_name = st.selectbox("Timezone", ["Europe/London", "UTC"], index=0)
     fuzzy_threshold = st.slider("Fuzzy company match threshold", min_value=70, max_value=95, value=82, help="Higher = stricter matches")
+
+    # --- Admin tools ---
     st.markdown("---")
-    st.markdown("**Auth methods:**")
-    st.markdown("• Streamlit Secrets: key `gcp_service_account` (JSON) + `SHEET_URL` (root or inside that block)")
-    st.markdown("• Or local `service_account.json` when running locally")
+    st.subheader("Admin tools")
+    admin_pin_secret = ""
+    if hasattr(st, "secrets"):
+        admin_pin_secret = st.secrets.get("ADMIN_PIN", "")
+        if not admin_pin_secret and "gcp_service_account" in st.secrets:
+            try:
+                admin_pin_secret = st.secrets["gcp_service_account"].get("ADMIN_PIN", "")
+            except Exception:
+                admin_pin_secret = ""
+    if not admin_pin_secret:
+        admin_pin_secret = os.environ.get("ADMIN_PIN", "")
+
+    admin_entered = st.text_input("Admin PIN", value="", type="password", help="Set ADMIN_PIN in Secrets to enable resets.")
+    is_admin = bool(admin_pin_secret) and admin_entered == admin_pin_secret
+
+    if is_admin:
+        st.success("Admin mode enabled")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            reset_today = st.button("🧹 Clear TODAY's locks (keep history)", use_container_width=True)
+        with col_b:
+            reset_all = st.button("🧨 Reset ALL locks (keep header)", use_container_width=True)
+        st.caption("Actions are permanent. Consider duplicating the sheet for archival first.")
+    else:
+        st.info("Enter Admin PIN to enable reset actions.")
 
 # ----------------------------
 # AUTH
@@ -162,19 +186,15 @@ def find_duplicates(df, company_n, email_n, phone_n, domain, fuzzy_threshold):
     # Build combined
     if hits:
         parts = [h[1] for h in hits]
-        combined = pd.concat(parts, axis=0).drop_duplicates().sort_values("Timestamp", ascending=False)
+        combined = pd.concat(parts, axis=0).drop_duplicates().sort_values("Timestamp", descending=False)
+        combined = combined.sort_values("Timestamp", ascending=False)
     else:
         combined = pd.DataFrame(columns=df.columns)
     return hits, combined
 
 # ----------------------------
-# SAFE PRECHECKS / EARLY UI
+# EARLY EXIT IF NO SHEET
 # ----------------------------
-if not 'confirm_sig' in st.session_state:
-    st.session_state['confirm_sig'] = None
-if not 'confirm_ready' in st.session_state:
-    st.session_state['confirm_ready'] = False
-
 if not sheet_url:
     st.warning("Admin: set SHEET_URL in Secrets so users aren't asked for it.")
     st.stop()
@@ -203,11 +223,59 @@ else:
                                "_company_n","_email_n","_domain","_phone_n"])
 
 # ----------------------------
+# ADMIN RESET ACTIONS
+# ----------------------------
+if 'admin_feedback' not in st.session_state:
+    st.session_state['admin_feedback'] = ''
+
+def admin_clear_today():
+    today_str = now_in_tz(tz_name).strftime("%Y-%m-%d")
+    values = ws.get_all_values()  # includes header
+    # Identify rows where Date == today_str; data rows start at index 1 (row 2)
+    to_delete = []
+    for idx, row in enumerate(values[1:], start=2):
+        if len(row) >= 2 and row[1] == today_str:  # column B is Date
+            to_delete.append(idx)
+    if not to_delete:
+        return "No rows for today to delete."
+    # Delete in reverse order to keep indexes valid
+    for r in reversed(to_delete):
+        ws.delete_rows(r)
+    return f"Deleted {len(to_delete)} row(s) for today ({today_str})."
+
+def admin_clear_all():
+    # Delete all rows except header
+    ws.delete_rows(2, ws.row_count)
+    return "All locks cleared (header preserved)."
+
+if 'admin_pin_checked' not in st.session_state:
+    st.session_state['admin_pin_checked'] = False
+
+if 'last_admin_action' not in st.session_state:
+    st.session_state['last_admin_action'] = ''
+
+# Execute admin actions if requested
+if 'is_admin' in locals() and is_admin:
+    if reset_today:
+        msg = admin_clear_today()
+        st.session_state['admin_feedback'] = msg
+        st.success(msg)
+        st.experimental_rerun()
+    if reset_all:
+        msg = admin_clear_all()
+        st.session_state['admin_feedback'] = msg
+        st.success(msg)
+        st.experimental_rerun()
+
+# ----------------------------
 # FORM: LOCK A CONTACT
 # ----------------------------
 st.subheader("Lock a Contact")
 
 with st.form("lock_form", clear_on_submit=False):
+    # Full-width live alert placeholder at top of form
+    live_alert = st.empty()
+
     col1, col2, col3 = st.columns([1.3,1,1])
     with col1:
         company = st.text_input("Company *")
@@ -240,6 +308,10 @@ with st.form("lock_form", clear_on_submit=False):
         else:
             st.success("✅ No duplicates found yet on company/email/phone/domain checks.")
 
+    # Show a big top-of-form banner if live duplicates detected (more obvious)
+    if live_hits:
+        live_alert.error("🚨 Potential duplicate(s) detected based on what you've typed. Please review before locking.")
+
     submitted = st.form_submit_button("🔒 Lock Contact")
 
     # Final submit logic with two-step confirm
@@ -254,7 +326,7 @@ with st.form("lock_form", clear_on_submit=False):
             hits, combined = find_duplicates(df, check_company, check_email, check_phone, check_domain, fuzzy_threshold)
             sig = f"{check_email}|{check_phone}|{check_company}"
 
-            if hits and (st.session_state['confirm_sig'] != sig or not st.session_state['confirm_ready']):
+            if hits and (st.session_state.get('confirm_sig') != sig or not st.session_state.get('confirm_ready', False)):
                 # First submit with duplicates -> show blocking banner
                 st.session_state['confirm_sig'] = sig
                 st.session_state['confirm_ready'] = True
