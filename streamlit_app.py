@@ -22,7 +22,7 @@ st.caption("Lock before you dial. Everyone sees locks instantly across brands. D
 # ----------------------------
 # Constants & helpers
 # ----------------------------
-BRANDS = ["Dartmouth Partners","Catalyst Partners","Pure Search","Other"]
+BRANDS = ["Dartmouth Partners", "Catalyst Partners", "Pure Search", "Other"]
 FUZZY_THRESHOLD = 82  # fixed
 
 def now_in_tz(tz="Europe/London"):
@@ -95,7 +95,11 @@ with st.sidebar:
         sheet_url = default_url
         st.caption("Sheet is preconfigured by the admin.")
     else:
-        sheet_url = st.text_input("Google Sheet URL (admin only)", value="", help="Set via Secrets as SHEET_URL so users never see this.")
+        sheet_url = st.text_input(
+            "Google Sheet URL (admin only)",
+            value="",
+            help="Set via Secrets as SHEET_URL so users never see this."
+        )
 
     tz_name = st.selectbox("Timezone", ["Europe/London", "UTC"], index=0)
 
@@ -135,10 +139,16 @@ with st.sidebar:
 def get_credentials():
     if hasattr(st, "secrets") and "gcp_service_account" in st.secrets:
         service_account_info = dict(st.secrets["gcp_service_account"])
-        scopes = ["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"]
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
         return Credentials.from_service_account_info(service_account_info, scopes=scopes)
     if os.path.exists("service_account.json"):
-        scopes = ["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"]
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
         return Credentials.from_service_account_file("service_account.json", scopes=scopes)
     raise RuntimeError("No credentials found. Add Streamlit secret `gcp_service_account` or upload service_account.json.")
 
@@ -154,33 +164,33 @@ def open_sheet(url: str):
         ws = sh.worksheet("Locks")
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title="Locks", rows=4000, cols=12)
-        ws.update("A1:I1", [["Timestamp","Date","Company","Contact Name","Email","Phone","Brand","Locked By","Notes"]])
+        ws.update("A1:I1", [["Timestamp", "Date", "Company", "Contact Name", "Email", "Phone", "Brand", "Locked By", "Notes"]])
     return ws, sh
 
 # ----------------------------
 # Session state init
 # ----------------------------
-if 'confirm_sig' not in st.session_state:
-    st.session_state['confirm_sig'] = None
-if 'confirm_ready' not in st.session_state:
-    st.session_state['confirm_ready'] = False
+if "confirm_sig" not in st.session_state:
+    st.session_state["confirm_sig"] = None
+if "confirm_ready" not in st.session_state:
+    st.session_state["confirm_ready"] = False
 
-for key in ["company","contact_name","email","phone","notes"]:
+for key in ["company", "contact_name", "email", "phone", "notes"]:
     st.session_state.setdefault(key, "")
 
 # form reset flag (pre-render clearing)
 st.session_state.setdefault("_do_clear_form", False)
 
 # Pull profile from URL if present (bypass popup on bookmarked link)
-if 'profile_name' not in st.session_state:
+if "profile_name" not in st.session_state:
     maybe_name = get_qp("name")
-    st.session_state['profile_name'] = maybe_name if isinstance(maybe_name, str) else ""
-if 'profile_brand' not in st.session_state:
+    st.session_state["profile_name"] = maybe_name if isinstance(maybe_name, str) else ""
+if "profile_brand" not in st.session_state:
     maybe_brand = get_qp("brand")
-    st.session_state['profile_brand'] = maybe_brand if maybe_brand in BRANDS else ""
+    st.session_state["profile_brand"] = maybe_brand if maybe_brand in BRANDS else ""
 
 # Blocking profile popup if profile not yet set
-if not st.session_state['profile_name'] or not st.session_state['profile_brand']:
+if not st.session_state["profile_name"] or not st.session_state["profile_brand"]:
     st.markdown("### 👋 Welcome! Set your profile")
     st.info("Please enter your **Name** and select your **Brand** to continue.")
     with st.form("profile_setup", clear_on_submit=False):
@@ -193,19 +203,19 @@ if not st.session_state['profile_name'] or not st.session_state['profile_brand']
             elif not p_brand:
                 st.warning("Brand is required.")
             else:
-                st.session_state['profile_name'] = p_name.strip()
-                st.session_state['profile_brand'] = p_brand
-                set_qp(name=st.session_state['profile_name'], brand=st.session_state['profile_brand'])
+                st.session_state["profile_name"] = p_name.strip()
+                st.session_state["profile_brand"] = p_brand
+                set_qp(name=st.session_state["profile_name"], brand=st.session_state["profile_brand"])
                 st.success("Profile saved. You can start locking contacts.")
                 st.experimental_rerun()
     st.stop()
 
 # From here, profile exists
-locked_by_profile = st.session_state['profile_name']
-brand_profile = st.session_state['profile_brand']
+locked_by_profile = st.session_state["profile_name"]
+brand_profile = st.session_state["profile_brand"]
 
 # Sheet URL required
-if not default_url and 'sheet_url' not in locals():
+if not default_url and "sheet_url" not in locals():
     sheet_url = ""
 if not sheet_url:
     st.warning("Admin: set SHEET_URL in Secrets so users aren't asked for it.")
@@ -219,15 +229,18 @@ except Exception as e:
     st.stop()
 
 rows = ws.get_all_records()
-df = pd.DataFrame(rows, columns=["Timestamp","Date","Company","Contact Name","Email","Phone","Brand","Locked By","Notes"])
+df = pd.DataFrame(rows, columns=["Timestamp", "Date", "Company", "Contact Name", "Email", "Phone", "Brand", "Locked By", "Notes"])
 if not df.empty:
     df["Timestamp"] = pd.to_datetime(df["Timestamp"], errors="coerce")
     df["_company_n"] = df["Company"].astype(str).apply(normalize_text)
     df["_email_n"] = df["Email"].astype(str).apply(normalize_text)
-    df["_domain"] = df["Email"].astype(str).apply(email_domain)
+    df["_domain"] = df["Email"].astype(str).apply(email_domain)  # kept for info, not used for duplicates
     df["_phone_n"] = df["Phone"].astype(str).apply(normalize_phone)
 else:
-    df = pd.DataFrame(columns=["Timestamp","Date","Company","Contact Name","Email","Phone","Brand","Locked By","Notes","_company_n","_email_n","_domain","_phone_n"])
+    df = pd.DataFrame(columns=[
+        "Timestamp", "Date", "Company", "Contact Name", "Email", "Phone", "Brand", "Locked By", "Notes",
+        "_company_n", "_email_n", "_domain", "_phone_n"
+    ])
 
 # ----------------------------
 # Admin actions
@@ -237,7 +250,7 @@ def get_or_create_archive(sh):
         arch = sh.worksheet("Archive")
     except gspread.WorksheetNotFound:
         arch = sh.add_worksheet(title="Archive", rows=4000, cols=12)
-        arch.update("A1:I1", [["Timestamp","Date","Company","Contact Name","Email","Phone","Brand","Locked By","Notes"]])
+        arch.update("A1:I1", [["Timestamp", "Date", "Company", "Contact Name", "Email", "Phone", "Brand", "Locked By", "Notes"]])
     return arch
 
 def admin_clear_today():
@@ -295,9 +308,9 @@ if is_admin:
         st.success(admin_archive_all_and_clear()); st.experimental_rerun()
 
 # ----------------------------
-# Duplicate finder
+# Duplicate finder (NO domain duplicate flag)
 # ----------------------------
-def find_duplicates(df, company_n, email_n, phone_n, domain):
+def find_duplicates(df, company_n, email_n, phone_n):
     hits = []
     if df.empty:
         return hits, pd.DataFrame(columns=df.columns)
@@ -309,8 +322,7 @@ def find_duplicates(df, company_n, email_n, phone_n, domain):
         exact_phone = df[df["_phone_n"] == phone_n]
         if not exact_phone.empty:
             hits.append(("Exact phone", exact_phone))
-    # Domain matches are informative only; no duplicate flagging
-if company_n and HAS_RAPIDFUZZ:
+    if company_n and HAS_RAPIDFUZZ:
         uniq_companies = df["_company_n"].dropna().unique().tolist()
         matched_vals = []
         for comp in uniq_companies:
@@ -335,7 +347,7 @@ if company_n and HAS_RAPIDFUZZ:
 # Pre-render form clear (IMPORTANT: before widgets)
 # ----------------------------
 if st.session_state.get("_do_clear_form"):
-    for _k in ["company","contact_name","email","phone","notes"]:
+    for _k in ["company", "contact_name", "email", "phone", "notes"]:
         st.session_state[_k] = ""
     st.session_state["_do_clear_form"] = False
 
@@ -360,23 +372,23 @@ with st.form("lock_form", clear_on_submit=False):
 
         st.markdown(" ")
         if st.form_submit_button("🧽 Clear form (Company/Contact/Email/Phone/Notes)"):
-            request_clear_form(); st.experimental_rerun()
+            request_clear_form()
+            st.experimental_rerun()
 
     with right:
         st.markdown("**Match Signals**")
         check_company = normalize_text(st.session_state["company"])
         check_email = normalize_text(st.session_state["email"])
-        check_domain = email_domain(st.session_state["email"])
         check_phone = normalize_phone(st.session_state["phone"])
 
-        live_hits, live_combined = find_duplicates(df, check_company, check_email, check_phone, check_domain)
+        live_hits, live_combined = find_duplicates(df, check_company, check_email, check_phone)
 
         if live_hits:
             st.error("⚠ Potential duplicate(s) detected while typing. Review below.")
             for label, sub in live_hits:
                 st.markdown(f"**{label}**")
                 st.dataframe(
-                    sub[["Timestamp","Company","Contact Name","Email","Phone","Brand","Locked By","Notes"]].sort_values("Timestamp", ascending=False),
+                    sub[["Timestamp", "Company", "Contact Name", "Email", "Phone", "Brand", "Locked By", "Notes"]].sort_values("Timestamp", ascending=False),
                     use_container_width=True
                 )
         else:
@@ -405,17 +417,22 @@ with st.form("lock_form", clear_on_submit=False):
         elif not email and not phone:
             st.warning("Please provide at least an Email or a Phone number.")
         else:
-            hits, combined = find_duplicates(df, normalize_text(company), normalize_text(email), normalize_phone(phone), email_domain(email))
+            hits, combined = find_duplicates(
+                df,
+                normalize_text(company),
+                normalize_text(email),
+                normalize_phone(phone),
+            )
             sig = f"{normalize_text(email)}|{normalize_phone(phone)}|{normalize_text(company)}"
 
-            if hits and (st.session_state.get('confirm_sig') != sig or not st.session_state.get('confirm_ready', False)):
-                st.session_state['confirm_sig'] = sig
-                st.session_state['confirm_ready'] = True
+            if hits and (st.session_state.get("confirm_sig") != sig or not st.session_state.get("confirm_ready", False)):
+                st.session_state["confirm_sig"] = sig
+                st.session_state["confirm_ready"] = True
                 st.error("⚠ Potential duplicate(s) detected — please review the matches on the right. "
                          "If you still want to proceed, click **Lock Contact** again to confirm.")
                 if not combined.empty:
                     st.dataframe(
-                        combined[["Timestamp","Company","Contact Name","Email","Phone","Brand","Locked By","Notes"]],
+                        combined[["Timestamp", "Company", "Contact Name", "Email", "Phone", "Brand", "Locked By", "Notes"]],
                         use_container_width=True
                     )
             else:
@@ -423,12 +440,16 @@ with st.form("lock_form", clear_on_submit=False):
                     ts = now_in_tz(tz_name)
                     date_str = ts.strftime("%Y-%m-%d")
                     ts_iso = ts.strftime("%Y-%m-%d %H:%M:%S")
-                    new_row = [ts_iso, date_str, company.strip(), contact_name.strip(), email.strip(), phone.strip(), brand, locked_by.strip(), notes.strip()]
+                    new_row = [
+                        ts_iso, date_str, company.strip(), contact_name.strip(),
+                        email.strip(), phone.strip(), brand, locked_by.strip(), notes.strip()
+                    ]
                     ws.append_row(new_row, value_input_option="USER_ENTERED")
                     st.success("Contact locked for today. Visible to all teams now.")
-                    st.session_state['confirm_sig'] = None
-                    st.session_state['confirm_ready'] = False
-                    request_clear_form(); st.experimental_rerun()
+                    st.session_state["confirm_sig"] = None
+                    st.session_state["confirm_ready"] = False
+                    request_clear_form()
+                    st.experimental_rerun()
                 except Exception as e:
                     st.error(f"Failed to save. Details: {e}")
 
@@ -471,7 +492,7 @@ if not df.empty:
         )
 
     st.dataframe(
-        today_df[["Timestamp","Company","Contact Name","Email","Phone","Brand","Locked By","Notes","Dup Today?"]]
+        today_df[["Timestamp", "Company", "Contact Name", "Email", "Phone", "Brand", "Locked By", "Notes", "Dup Today?"]]
         .sort_values("Timestamp", ascending=False),
         use_container_width=True
     )
@@ -479,4 +500,4 @@ else:
     st.info("No locks yet.")
 
 st.markdown("---")
-st.caption(f"Signals used: exact email/phone and fuzzy company match (threshold 82).
+st.caption(f"Signals used: exact email/phone and fuzzy company match (threshold {FUZZY_THRESHOLD}).")
