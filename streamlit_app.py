@@ -137,13 +137,6 @@ with st.sidebar:
             st.session_state["brand"] = st.session_state["profile_brand"]
             st.success("Form defaults synced from your profile.")
     with colp2:
-        if st.button("Clear profile (this device)"):
-            st.session_state["profile_name"] = ""
-            st.session_state["profile_brand"] = BRANDS[0]
-            set_qp(name="", brand="")
-            st.session_state["prev_profile_name"] = ""
-            st.session_state["prev_profile_brand"] = BRANDS[0]
-            st.info("Profile cleared.")
 
     # --- Admin tools ---
     st.markdown("---")
