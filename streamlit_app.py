@@ -207,7 +207,7 @@ if not st.session_state["profile_name"] or not st.session_state["profile_brand"]
                 st.session_state["profile_brand"] = p_brand
                 set_qp(name=st.session_state["profile_name"], brand=st.session_state["profile_brand"])
                 st.success("Profile saved. You can start locking contacts.")
-                st.experimental_rerun()
+                st.rerun()
     st.stop()
 
 # From here, profile exists
@@ -299,13 +299,13 @@ def admin_archive_all_and_clear():
 
 if is_admin:
     if 'reset_today' in locals() and reset_today:
-        st.success(admin_clear_today()); st.experimental_rerun()
+        st.success(admin_clear_today()); st.rerun()
     if 'reset_all' in locals() and reset_all:
-        st.success(admin_clear_all()); st.experimental_rerun()
+        st.success(admin_clear_all()); st.rerun()
     if 'archive_today' in locals() and archive_today:
-        st.success(admin_archive_today_and_clear()); st.experimental_rerun()
+        st.success(admin_archive_today_and_clear()); st.rerun()
     if 'archive_all' in locals() and archive_all:
-        st.success(admin_archive_all_and_clear()); st.experimental_rerun()
+        st.success(admin_archive_all_and_clear()); st.rerun()
 
 # ----------------------------
 # Duplicate finder (NO domain duplicate flag)
@@ -373,7 +373,7 @@ with st.form("lock_form", clear_on_submit=False):
         st.markdown(" ")
         if st.form_submit_button("🧽 Clear form (Company/Contact/Email/Phone/Notes)"):
             request_clear_form()
-            st.experimental_rerun()
+            st.rerun()
 
     with right:
         st.markdown("**Match Signals**")
@@ -449,7 +449,7 @@ with st.form("lock_form", clear_on_submit=False):
                     st.session_state["confirm_sig"] = None
                     st.session_state["confirm_ready"] = False
                     request_clear_form()
-                    st.experimental_rerun()
+                    st.rerun()
                 except Exception as e:
                     st.error(f"Failed to save. Details: {e}")
 
