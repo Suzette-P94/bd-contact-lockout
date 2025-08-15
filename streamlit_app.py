@@ -520,7 +520,7 @@ if not df.empty:
     if not today_df.empty:
         today_df["Dup Today?"] = (
             today_df.duplicated(subset=["_email_n"], keep="first") |
-            today_df.uplicated(subset=["_phone_n"], keep="first") |
+            today_df.duplicated(subset=["_phone_n"], keep="first") |
             today_df.duplicated(subset=["_company_n"], keep="first")
         )
 
