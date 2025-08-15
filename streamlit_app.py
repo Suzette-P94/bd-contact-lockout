@@ -72,11 +72,13 @@ with st.sidebar:
         col_a, col_b = st.columns(2)
         with col_a:
             reset_today = st.button("🧹 Clear TODAY's locks (keep history)", use_container_width=True)
+            archive_today = st.button("📦 Archive TODAY to 'Archive' + Clear", use_container_width=True)
         with col_b:
             reset_all = st.button("🧨 Reset ALL locks (keep header)", use_container_width=True)
-        st.caption("Actions are permanent. Consider duplicating the sheet for archival first.")
+            archive_all = st.button("📦 Archive ALL to 'Archive' + Clear", use_container_width=True)
+        st.caption("Actions are permanent. Consider duplicating the sheet for archival first (Archive buttons will copy rows to an 'Archive' worksheet).")
     else:
-        st.info("Enter Admin PIN to enable reset actions.")
+        st.info("Enter Admin PIN to enable reset/archival actions.")
 
 # ----------------------------
 # AUTH
@@ -115,7 +117,7 @@ def open_sheet(url: str):
             "A1:I1",
             [["Timestamp","Date","Company","Contact Name","Email","Phone","Brand","Locked By","Notes"]],
         )
-    return ws
+    return ws, sh
 
 def now_in_tz(tz="Europe/London"):
     try:
@@ -183,10 +185,10 @@ def find_duplicates(df, company_n, email_n, phone_n, domain, fuzzy_threshold):
             if not fuzzy_df.empty:
                 hits.append((f"Fuzzy company ≥{fuzzy_threshold}", fuzzy_df))
 
-    # Build combined
+    # Build combined (sort newest first)
     if hits:
         parts = [h[1] for h in hits]
-        combined = pd.concat(parts, axis=0).drop_duplicates().sort_values("Timestamp", descending=False)
+        combined = pd.concat(parts, axis=0).drop_duplicates()
         combined = combined.sort_values("Timestamp", ascending=False)
     else:
         combined = pd.DataFrame(columns=df.columns)
@@ -195,6 +197,15 @@ def find_duplicates(df, company_n, email_n, phone_n, domain, fuzzy_threshold):
 # ----------------------------
 # EARLY EXIT IF NO SHEET
 # ----------------------------
+if not 'confirm_sig' in st.session_state:
+    st.session_state['confirm_sig'] = None
+if not 'confirm_ready' in st.session_state:
+    st.session_state['confirm_ready'] = False
+
+if not default_url and not 'sheet_url' in locals():
+    # If we somehow didn't set sheet_url (shouldn't happen), set to empty to trigger warning below
+    sheet_url = ""
+
 if not sheet_url:
     st.warning("Admin: set SHEET_URL in Secrets so users aren't asked for it.")
     st.stop()
@@ -203,7 +214,7 @@ if not sheet_url:
 # LOAD EXISTING DATA
 # ----------------------------
 try:
-    ws = open_sheet(sheet_url)
+    ws, sh = open_sheet(sheet_url)
 except Exception as e:
     st.error(f"Could not open sheet. Check URL, sharing and credentials. Details: {e}")
     st.stop()
@@ -223,48 +234,73 @@ else:
                                "_company_n","_email_n","_domain","_phone_n"])
 
 # ----------------------------
-# ADMIN RESET ACTIONS
+# ADMIN RESET/ARCHIVE ACTIONS
 # ----------------------------
-if 'admin_feedback' not in st.session_state:
-    st.session_state['admin_feedback'] = ''
+def get_or_create_archive(sh):
+    try:
+        arch = sh.worksheet("Archive")
+    except gspread.WorksheetNotFound:
+        arch = sh.add_worksheet(title="Archive", rows=4000, cols=12)
+        arch.update("A1:I1", [["Timestamp","Date","Company","Contact Name","Email","Phone","Brand","Locked By","Notes"]])
+    return arch
 
 def admin_clear_today():
     today_str = now_in_tz(tz_name).strftime("%Y-%m-%d")
     values = ws.get_all_values()  # includes header
-    # Identify rows where Date == today_str; data rows start at index 1 (row 2)
     to_delete = []
     for idx, row in enumerate(values[1:], start=2):
         if len(row) >= 2 and row[1] == today_str:  # column B is Date
             to_delete.append(idx)
     if not to_delete:
         return "No rows for today to delete."
-    # Delete in reverse order to keep indexes valid
     for r in reversed(to_delete):
         ws.delete_rows(r)
     return f"Deleted {len(to_delete)} row(s) for today ({today_str})."
 
 def admin_clear_all():
-    # Delete all rows except header
     ws.delete_rows(2, ws.row_count)
     return "All locks cleared (header preserved)."
 
-if 'admin_pin_checked' not in st.session_state:
-    st.session_state['admin_pin_checked'] = False
+def admin_archive_today_and_clear():
+    today_str = now_in_tz(tz_name).strftime("%Y-%m-%d")
+    values = ws.get_all_values()  # includes header
+    rows_to_archive = []
+    row_numbers = []
+    for idx, row in enumerate(values[1:], start=2):
+        if len(row) >= 2 and row[1] == today_str:
+            rows_to_archive.append(row[:9])  # A..I
+            row_numbers.append(idx)
+    if not rows_to_archive:
+        return "No rows for today to archive."
+    arch = get_or_create_archive(sh)
+    arch.append_rows(rows_to_archive, value_input_option="USER_ENTERED")
+    for r in reversed(row_numbers):
+        ws.delete_rows(r)
+    return f"Archived and cleared {len(rows_to_archive)} row(s) for today ({today_str})."
 
-if 'last_admin_action' not in st.session_state:
-    st.session_state['last_admin_action'] = ''
+def admin_archive_all_and_clear():
+    values = ws.get_all_values()
+    if len(values) <= 1:
+        return "No data rows to archive."
+    data_rows = [row[:9] for row in values[1:]]  # A..I
+    arch = get_or_create_archive(sh)
+    arch.append_rows(data_rows, value_input_option="USER_ENTERED")
+    ws.delete_rows(2, ws.row_count)
+    return f"Archived and cleared {len(data_rows)} row(s)."
 
 # Execute admin actions if requested
 if 'is_admin' in locals() and is_admin:
-    if reset_today:
-        msg = admin_clear_today()
-        st.session_state['admin_feedback'] = msg
-        st.success(msg)
+    if 'reset_today' in locals() and reset_today:
+        st.success(admin_clear_today())
         st.experimental_rerun()
-    if reset_all:
-        msg = admin_clear_all()
-        st.session_state['admin_feedback'] = msg
-        st.success(msg)
+    if 'reset_all' in locals() and reset_all:
+        st.success(admin_clear_all())
+        st.experimental_rerun()
+    if 'archive_today' in locals() and archive_today:
+        st.success(admin_archive_today_and_clear())
+        st.experimental_rerun()
+    if 'archive_all' in locals() and archive_all:
+        st.success(admin_archive_all_and_clear())
         st.experimental_rerun()
 
 # ----------------------------
