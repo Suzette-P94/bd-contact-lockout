@@ -137,6 +137,7 @@ with st.sidebar:
             st.session_state["brand"] = st.session_state["profile_brand"]
             st.success("Form defaults synced from your profile.")
     with colp2:
+    pass  # placeholder to avoid IndentationError
 
     # --- Admin tools ---
     st.markdown("---")
