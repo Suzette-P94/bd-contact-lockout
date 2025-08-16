@@ -1,6 +1,5 @@
 
 import os
-import hashlib
 from datetime import datetime, timezone
 import pandas as pd
 import streamlit as st
@@ -18,7 +17,7 @@ except Exception:
 
 st.set_page_config(page_title="BD Day – Contact Lockout", page_icon="📞", layout="wide")
 st.title("📞 BD Day – Contact Lockout")
-st.caption("Lock before you dial. Everyone sees locks instantly across brands. Duplicate checks: exact email/phone (via hashes) and fuzzy company (82). No emails or phone numbers are stored.")
+st.caption("Lock before you dial. Everyone sees locks instantly across brands. Duplicate checks: exact email/phone and fuzzy company (optional).")
 
 # ----------------------------
 # Constants & helpers
@@ -75,28 +74,6 @@ def set_qp(**kwargs):
     except Exception:
         pass
 
-def get_salt() -> str:
-    # Prefer secrets, then env var; default to fixed string (encourage setting a secret)
-    salt = ""
-    if hasattr(st, "secrets"):
-        salt = st.secrets.get("HASH_SALT", "")
-        if not salt and "gcp_service_account" in st.secrets:
-            try:
-                salt = st.secrets["gcp_service_account"].get("HASH_SALT", "")
-            except Exception:
-                salt = ""
-    if not salt:
-        salt = os.environ.get("HASH_SALT", "")
-    if not salt:
-        salt = "set-a-strong-random-salt-in-secrets"  # fallback; recommend replacing
-    return salt
-
-def sha256_hex(value: str) -> str:
-    if not value:
-        return ""
-    h = hashlib.sha256(value.encode("utf-8")).hexdigest()
-    return h
-
 # ----------------------------
 # Sidebar (minimal)
 # ----------------------------
@@ -118,7 +95,11 @@ with st.sidebar:
         sheet_url = default_url
         st.caption("Sheet is preconfigured by the admin.")
     else:
-        sheet_url = st.text_input("Google Sheet URL (admin only)", value="", help="Set via Secrets as SHEET_URL so users never see this.")
+        sheet_url = st.text_input(
+            "Google Sheet URL (admin only)",
+            value="",
+            help="Set via Secrets as SHEET_URL so users never see this."
+        )
 
     tz_name = st.selectbox("Timezone", ["Europe/London", "UTC"], index=0)
 
@@ -158,10 +139,16 @@ with st.sidebar:
 def get_credentials():
     if hasattr(st, "secrets") and "gcp_service_account" in st.secrets:
         service_account_info = dict(st.secrets["gcp_service_account"])
-        scopes = ["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"]
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
         return Credentials.from_service_account_info(service_account_info, scopes=scopes)
     if os.path.exists("service_account.json"):
-        scopes = ["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"]
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
         return Credentials.from_service_account_file("service_account.json", scopes=scopes)
     raise RuntimeError("No credentials found. Add Streamlit secret `gcp_service_account` or upload service_account.json.")
 
@@ -177,30 +164,7 @@ def open_sheet(url: str):
         ws = sh.worksheet("Locks")
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title="Locks", rows=4000, cols=12)
-        ws.update("A1:H1", [[
-            "Timestamp","Date","Company","Contact Name","Brand","Locked By","Notes","EmailHash","PhoneHash"
-        ]])
-    else:
-        # Attempt to migrate: remove Email/Phone PII columns if present; ensure hash columns exist
-        try:
-            headers = ws.row_values(1)
-            # Add hash columns if missing
-            if "EmailHash" not in headers:
-                ws.update_cell(1, len(headers)+1, "EmailHash")
-                headers.append("EmailHash")
-            if "PhoneHash" not in headers:
-                ws.update_cell(1, len(headers)+1, "PhoneHash")
-                headers.append("PhoneHash")
-            # Remove PII columns if present
-            # We delete from right to left to keep indices valid
-            if "Phone" in headers:
-                idx = headers.index("Phone") + 1
-                ws.delete_columns(idx)
-            if "Email" in headers:
-                idx = ws.row_values(1).index("Email") + 1
-                ws.delete_columns(idx)
-        except Exception:
-            pass
+        ws.update("A1:I1", [["Timestamp", "Date", "Company", "Contact Name", "Email", "Phone", "Brand", "Locked By", "Notes"]])
     return ws, sh
 
 # ----------------------------
@@ -243,7 +207,7 @@ if not st.session_state["profile_name"] or not st.session_state["profile_brand"]
                 st.session_state["profile_brand"] = p_brand
                 set_qp(name=st.session_state["profile_name"], brand=st.session_state["profile_brand"])
                 st.success("Profile saved. You can start locking contacts.")
-                st.rerun()
+                st.experimental_rerun()
     st.stop()
 
 # From here, profile exists
@@ -265,21 +229,18 @@ except Exception as e:
     st.stop()
 
 rows = ws.get_all_records()
-# Backward compatibility: tolerate presence/absence of hash columns in historical data
-expected_cols = ["Timestamp","Date","Company","Contact Name","Brand","Locked By","Notes","EmailHash","PhoneHash"]
-df = pd.DataFrame(rows)
-for col in expected_cols:
-    if col not in df.columns:
-        df[col] = ""
-
+df = pd.DataFrame(rows, columns=["Timestamp", "Date", "Company", "Contact Name", "Email", "Phone", "Brand", "Locked By", "Notes"])
 if not df.empty:
     df["Timestamp"] = pd.to_datetime(df["Timestamp"], errors="coerce")
     df["_company_n"] = df["Company"].astype(str).apply(normalize_text)
-    df["_email_h"] = df["EmailHash"].astype(str)
-    df["_phone_h"] = df["PhoneHash"].astype(str)
+    df["_email_n"] = df["Email"].astype(str).apply(normalize_text)
+    df["_domain"] = df["Email"].astype(str).apply(email_domain)  # kept for info, not used for duplicates
+    df["_phone_n"] = df["Phone"].astype(str).apply(normalize_phone)
 else:
-    df = pd.DataFrame(columns=["Timestamp","Date","Company","Contact Name","Brand","Locked By","Notes","EmailHash","PhoneHash",
-                               "_company_n","_email_h","_phone_h"])
+    df = pd.DataFrame(columns=[
+        "Timestamp", "Date", "Company", "Contact Name", "Email", "Phone", "Brand", "Locked By", "Notes",
+        "_company_n", "_email_n", "_domain", "_phone_n"
+    ])
 
 # ----------------------------
 # Admin actions
@@ -289,7 +250,7 @@ def get_or_create_archive(sh):
         arch = sh.worksheet("Archive")
     except gspread.WorksheetNotFound:
         arch = sh.add_worksheet(title="Archive", rows=4000, cols=12)
-        arch.update("A1:G1", [["Timestamp","Date","Company","Contact Name","Brand","Locked By","Notes"]])
+        arch.update("A1:I1", [["Timestamp", "Date", "Company", "Contact Name", "Email", "Phone", "Brand", "Locked By", "Notes"]])
     return arch
 
 def admin_clear_today():
@@ -316,7 +277,7 @@ def admin_archive_today_and_clear():
     row_numbers = []
     for idx, row in enumerate(values[1:], start=2):
         if len(row) >= 2 and row[1] == today_str:
-            rows_to_archive.append(row[:7])  # up to Notes
+            rows_to_archive.append(row[:9])
             row_numbers.append(idx)
     if not rows_to_archive:
         return "No rows for today to archive."
@@ -330,7 +291,7 @@ def admin_archive_all_and_clear():
     values = ws.get_all_values()
     if len(values) <= 1:
         return "No data rows to archive."
-    data_rows = [row[:7] for row in values[1:]]  # up to Notes
+    data_rows = [row[:9] for row in values[1:]]
     arch = get_or_create_archive(sh)
     arch.append_rows(data_rows, value_input_option="USER_ENTERED")
     ws.delete_rows(2, ws.row_count)
@@ -338,29 +299,29 @@ def admin_archive_all_and_clear():
 
 if is_admin:
     if 'reset_today' in locals() and reset_today:
-        st.success(admin_clear_today()); st.rerun()
+        st.success(admin_clear_today()); st.experimental_rerun()
     if 'reset_all' in locals() and reset_all:
-        st.success(admin_clear_all()); st.rerun()
+        st.success(admin_clear_all()); st.experimental_rerun()
     if 'archive_today' in locals() and archive_today:
-        st.success(admin_archive_today_and_clear()); st.rerun()
+        st.success(admin_archive_today_and_clear()); st.experimental_rerun()
     if 'archive_all' in locals() and archive_all:
-        st.success(admin_archive_all_and_clear()); st.rerun()
+        st.success(admin_archive_all_and_clear()); st.experimental_rerun()
 
 # ----------------------------
-# Duplicate finder (using hashes + fuzzy company)
+# Duplicate finder (NO domain duplicate flag)
 # ----------------------------
-def find_duplicates(df, company_n, email_hash, phone_hash):
+def find_duplicates(df, company_n, email_n, phone_n):
     hits = []
     if df.empty:
         return hits, pd.DataFrame(columns=df.columns)
-    if email_hash:
-        exact_email = df[df["_email_h"] == email_hash]
+    if email_n:
+        exact_email = df[df["_email_n"] == email_n]
         if not exact_email.empty:
-            hits.append(("Exact email (hashed)", exact_email))
-    if phone_hash:
-        exact_phone = df[df["_phone_h"] == phone_hash]
+            hits.append(("Exact email", exact_email))
+    if phone_n:
+        exact_phone = df[df["_phone_n"] == phone_n]
         if not exact_phone.empty:
-            hits.append(("Exact phone (hashed)", exact_phone))
+            hits.append(("Exact phone", exact_phone))
     if company_n and HAS_RAPIDFUZZ:
         uniq_companies = df["_company_n"].dropna().unique().tolist()
         matched_vals = []
@@ -383,7 +344,7 @@ def find_duplicates(df, company_n, email_hash, phone_hash):
     return hits, combined
 
 # ----------------------------
-# Pre-render form clear (before widgets)
+# Pre-render form clear (IMPORTANT: before widgets)
 # ----------------------------
 if st.session_state.get("_do_clear_form"):
     for _k in ["company", "contact_name", "email", "phone", "notes"]:
@@ -405,33 +366,29 @@ with st.form("lock_form", clear_on_submit=False):
     with left:
         company = st.text_input("Company *", key="company")
         contact_name = st.text_input("Contact Name *", key="contact_name")
-        email = st.text_input("Email (used for duplicate check only; not stored)", key="email")
-        phone = st.text_input("Phone (used for duplicate check only; not stored)", key="phone")
+        email = st.text_input("Email (recommended)", key="email")
+        phone = st.text_input("Phone", key="phone")
         notes = st.text_area("Notes (optional)", height=72, key="notes")
 
         st.markdown(" ")
         if st.form_submit_button("🧽 Clear form (Company/Contact/Email/Phone/Notes)"):
             request_clear_form()
-            st.rerun()
+            st.experimental_rerun()
 
     with right:
         st.markdown("**Match Signals**")
-        # Compute normalized + hashed values for live checks (not stored)
-        salt = get_salt()
         check_company = normalize_text(st.session_state["company"])
         check_email = normalize_text(st.session_state["email"])
         check_phone = normalize_phone(st.session_state["phone"])
-        email_hash = sha256_hex(salt + check_email) if check_email else ""
-        phone_hash = sha256_hex(salt + check_phone) if check_phone else ""
 
-        live_hits, live_combined = find_duplicates(df, check_company, email_hash, phone_hash)
+        live_hits, live_combined = find_duplicates(df, check_company, check_email, check_phone)
 
         if live_hits:
             st.error("⚠ Potential duplicate(s) detected while typing. Review below.")
             for label, sub in live_hits:
                 st.markdown(f"**{label}**")
                 st.dataframe(
-                    sub[["Timestamp", "Company", "Contact Name", "Brand", "Locked By", "Notes"]].sort_values("Timestamp", ascending=False),
+                    sub[["Timestamp", "Company", "Contact Name", "Email", "Phone", "Brand", "Locked By", "Notes"]].sort_values("Timestamp", ascending=False),
                     use_container_width=True
                 )
         else:
@@ -458,14 +415,15 @@ with st.form("lock_form", clear_on_submit=False):
         elif not company or not contact_name:
             st.warning("Please fill in all *required* fields (Company, Contact Name).")
         elif not email and not phone:
-            st.warning("Please provide at least an Email or a Phone number (used for duplicate check only).")
+            st.warning("Please provide at least an Email or a Phone number.")
         else:
-            salt = get_salt()
-            email_hash = sha256_hex(salt + normalize_text(email)) if email else ""
-            phone_hash = sha256_hex(salt + normalize_phone(phone)) if phone else ""
-
-            hits, combined = find_duplicates(df, normalize_text(company), email_hash, phone_hash)
-            sig = f"{email_hash}|{phone_hash}|{normalize_text(company)}"
+            hits, combined = find_duplicates(
+                df,
+                normalize_text(company),
+                normalize_text(email),
+                normalize_phone(phone),
+            )
+            sig = f"{normalize_text(email)}|{normalize_phone(phone)}|{normalize_text(company)}"
 
             if hits and (st.session_state.get("confirm_sig") != sig or not st.session_state.get("confirm_ready", False)):
                 st.session_state["confirm_sig"] = sig
@@ -474,7 +432,7 @@ with st.form("lock_form", clear_on_submit=False):
                          "If you still want to proceed, click **Lock Contact** again to confirm.")
                 if not combined.empty:
                     st.dataframe(
-                        combined[["Timestamp", "Company", "Contact Name", "Brand", "Locked By", "Notes"]],
+                        combined[["Timestamp", "Company", "Contact Name", "Email", "Phone", "Brand", "Locked By", "Notes"]],
                         use_container_width=True
                     )
             else:
@@ -482,35 +440,33 @@ with st.form("lock_form", clear_on_submit=False):
                     ts = now_in_tz(tz_name)
                     date_str = ts.strftime("%Y-%m-%d")
                     ts_iso = ts.strftime("%Y-%m-%d %H:%M:%S")
-                    # Append WITHOUT storing PII (email/phone); store only salted hashes
                     new_row = [
                         ts_iso, date_str, company.strip(), contact_name.strip(),
-                        brand, locked_by.strip(), notes.strip(),
-                        email_hash, phone_hash
+                        email.strip(), phone.strip(), brand, locked_by.strip(), notes.strip()
                     ]
-                    # Ensure header shape matches:
-                    # ["Timestamp","Date","Company","Contact Name","Brand","Locked By","Notes","EmailHash","PhoneHash"]
                     ws.append_row(new_row, value_input_option="USER_ENTERED")
-                    st.success("Contact locked for today. Visible to all teams now (no email/phone stored).")
+                    st.success("Contact locked for today. Visible to all teams now.")
                     st.session_state["confirm_sig"] = None
                     st.session_state["confirm_ready"] = False
                     request_clear_form()
-                    st.rerun()
+                    st.experimental_rerun()
                 except Exception as e:
                     st.error(f"Failed to save. Details: {e}")
 
 # ----------------------------
-# Today view (no email/phone columns)
+# Today view
 # ----------------------------
 st.subheader("Today’s Locks (Live)")
 with st.expander("Filters", expanded=True):
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
         q_company = st.text_input("Filter by Company")
     with c2:
-        q_contact = st.text_input("Filter by Contact Name")
+        q_email = st.text_input("Filter by Email")
     with c3:
         brand_filter = st.multiselect("Filter by Brand", BRANDS)
+    with c4:
+        q_phone = st.text_input("Filter by Phone (digits only)")
 
 if not df.empty:
     today_str = now_in_tz(tz_name).strftime("%Y-%m-%d")
@@ -519,32 +475,24 @@ if not df.empty:
     if q_company:
         qn = normalize_text(q_company)
         today_df = today_df[today_df["_company_n"].str.contains(qn, na=False)]
-    if q_contact:
-        qn = normalize_text(q_contact)
-        if "Contact Name" in today_df.columns:
-            today_df["_contact_n"] = today_df["Contact Name"].astype(str).apply(normalize_text)
-            today_df = today_df[today_df["_contact_n"].str.contains(qn, na=False)]
+    if q_email:
+        qn = normalize_text(q_email)
+        today_df = today_df[today_df["_email_n"].str.contains(qn, na=False)]
     if brand_filter:
         today_df = today_df[today_df["Brand"].isin(brand_filter)]
+    if q_phone:
+        qn = normalize_phone(q_phone)
+        today_df = today_df[today_df["_phone_n"].str.contains(qn, na=False)]
 
-    # Dup mark (today) using hashes and company
     if not today_df.empty:
-        # Build temp normalized cols if missing
-        if "_company_n" not in today_df.columns:
-            today_df["_company_n"] = today_df["Company"].astype(str).apply(normalize_text)
-        if "_email_h" not in today_df.columns and "EmailHash" in today_df.columns:
-            today_df["_email_h"] = today_df["EmailHash"].astype(str)
-        if "_phone_h" not in today_df.columns and "PhoneHash" in today_df.columns:
-            today_df["_phone_h"] = today_df["PhoneHash"].astype(str)
-
         today_df["Dup Today?"] = (
-            today_df.duplicated(subset=["_email_h"], keep="first") |
-            today_df.duplicated(subset=["_phone_h"], keep="first") |
+            today_df.duplicated(subset=["_email_n"], keep="first") |
+            today_df.duplicated(subset=["_phone_n"], keep="first") |
             today_df.duplicated(subset=["_company_n"], keep="first")
         )
 
     st.dataframe(
-        today_df[["Timestamp","Company","Contact Name","Brand","Locked By","Notes","Dup Today?"]]
+        today_df[["Timestamp", "Company", "Contact Name", "Email", "Phone", "Brand", "Locked By", "Notes", "Dup Today?"]]
         .sort_values("Timestamp", ascending=False),
         use_container_width=True
     )
@@ -552,4 +500,4 @@ else:
     st.info("No locks yet.")
 
 st.markdown("---")
-st.caption("No email or phone numbers are stored. Duplicate checks use salted hashes of email/phone and fuzzy company match (82).")
+st.caption(f"Signals used: exact email/phone and fuzzy company match (threshold {FUZZY_THRESHOLD}).")
